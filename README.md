@@ -102,32 +102,74 @@ npm run deploy:commands
 12. `/계절투자 정산미리보기` → `/계절투자 정산`
 13. `/계절투자 다음라운드` 또는 `/계절투자 이벤트종료`
 
+## Windows PC에서 직접 빌드하기
+
+### 필요 프로그램
+- Node.js 22 이상
+- npm
+
+### 빌드 순서
+1. GitHub 저장소의 소스 ZIP을 다운로드합니다.
+2. ZIP 압축을 해제합니다.
+3. 프로젝트 폴더에서 터미널을 실행합니다.
+4. `npm install`로 의존성을 설치합니다.
+5. `.env.example`을 복사해 `.env`를 생성합니다.
+6. `.env` 값을 입력합니다.
+7. `npm run build`로 `dist/`를 생성합니다.
+8. `npm run deploy:commands`로 슬래시 명령어를 등록합니다.
+9. `npm start`로 봇을 실행합니다.
+
+### Windows 명령어 예시
+```bat
+copy .env.example .env
+npm install
+npm run build
+npm run deploy:commands
+npm start
+```
+
 ## 디스호스트 배포
 
-### GitHub Actions 아티팩트 다운로드
-1. GitHub 저장소의 `Actions` 탭으로 이동합니다.
-2. `Build Dishost Package` 워크플로를 선택합니다.
-3. 가장 최근의 성공한 실행을 선택합니다.
-4. 화면 아래 `Artifacts`에서 `청춘거래소-디스호스트`를 다운로드합니다.
-5. 다운로드된 아티팩트 압축을 풀면 `youth-exchange-bot-dishost.zip`이 나옵니다.
-6. 해당 ZIP을 디스호스트 Files 메뉴에 업로드하고 압축 해제합니다.
-7. 디스호스트에서 `.env.example`을 참고해 `.env`를 작성합니다.
-8. 디스호스트 콘솔에서 `npm ci`, `npm run deploy:commands`, `npm start` 순서로 실행합니다.
+디스호스트에 올릴 파일은 사용자가 로컬 PC에서 직접 `npm run build`를 실행한 뒤 준비합니다. GitHub Actions는 ZIP이나 `dist/` 빌드 산출물을 생성하거나 업로드하지 않습니다.
 
-### 직접 배포 순서
-1. `.env` 작성
-2. `npm ci`
-3. `npm run build`
-4. `npm run deploy:commands`
-5. `npm start`
+### 업로드 대상
+- `dist/`
+- `package.json`
+- `package-lock.json`
+- `.env.example`
+- `README.md`
+- `data/.gitkeep`
+- 필요한 운영 설정 파일이 있다면 함께 포함합니다.
+
+### 업로드 제외 대상
+- `node_modules/`
+- `src/`는 선택 사항입니다.
+- `tests/`
+- `coverage/`
+- `.git/`
+- 실제 `.env`
+- `data/youth-exchange.db`
+
+### 디스호스트 실행 순서
+Windows에서 생성한 `node_modules`는 업로드하지 마세요. 디스호스트 서버에서 Linux 환경에 맞게 의존성을 다시 설치합니다.
+
+```bash
+npm ci --omit=dev
+npm start
+```
+
+슬래시 명령어는 사용자 PC에서 먼저 등록하거나, 디스호스트에서 다음 명령어로 등록할 수 있습니다.
+
+```bash
+npm run deploy:commands
+```
 
 주의사항:
 - Windows의 `node_modules`를 업로드하지 마세요.
-- 서버에서 `npm ci` 또는 `npm install`을 실행하세요.
 - `better-sqlite3` 설치 오류가 발생하면 기존 `node_modules`를 삭제한 뒤 서버에서 다시 설치하세요.
 - Node.js 버전이 `>=22`인지 확인하세요.
 - 설치 오류 발생 시 디스호스트 콘솔의 전체 로그를 확인하세요.
-- `youth-exchange-bot-dishost.zip` 파일은 Git에 커밋하지 않고 GitHub Actions 아티팩트로만 제공합니다.
+- `youth-exchange-bot-dishost.zip` 파일은 Git에 커밋하지 않습니다.
 
 ## SQLite 데이터 저장 및 백업
 기본 DB 경로는 `./data/youth-exchange.db`입니다. `data` 폴더가 없으면 자동 생성되며 기존 DB는 초기화하지 않습니다.
@@ -149,7 +191,4 @@ node dist/index.js
 토큰이 없는 환경에서 `node dist/index.js`는 DB 연결/마이그레이션/판매 작업 복구 후 필수 환경 변수 누락을 출력하고 종료합니다.
 
 ## 업로드 ZIP
-GitHub Actions의 `Build Dishost Package` 워크플로가 `youth-exchange-bot-dishost.zip`을 생성하고 `청춘거래소-디스호스트` 아티팩트로 업로드합니다.
-ZIP 최상위 포함: `package.json`, `package-lock.json`, `dist/`, `src/`, `data/.gitkeep`, `README.md`, `AGENTS.md`, `.env.example`, `tsconfig.json`, 실행에 필요한 설정 파일.
-ZIP 제외: `node_modules/`, `.git/`, `.github/`, `coverage/`, `logs/`, `*.log`, `.env`, `data/youth-exchange.db`, `tests/`.
-압축 해제 시 불필요한 상위 폴더 없이 최상위에 바로 `package.json`과 `dist/`가 나타납니다.
+이 저장소는 디스호스트 ZIP을 GitHub Actions 아티팩트로 생성하지 않습니다. 사용자가 로컬 PC에서 직접 `npm run build`를 실행해 `dist/`를 만든 뒤, 필요한 파일만 모아 디스호스트 Files 메뉴에 업로드합니다.

@@ -1,4 +1,4 @@
-name: Build Dishost Package
+name: CI
 
 on:
   push:
@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-dishost-package:
-    name: Build Dishost Package
+  checks:
+    name: Checks
     runs-on: ubuntu-latest
 
     steps:
@@ -33,43 +33,3 @@ jobs:
 
       - name: Run tests
         run: npm test
-
-      - name: Build TypeScript
-        run: npm run build
-
-      - name: Prepare Dishost package directory
-        run: |
-          rm -rf release
-          mkdir -p release/package/data
-          cp package.json release/package/package.json
-          cp package-lock.json release/package/package-lock.json
-          cp README.md release/package/README.md
-          cp AGENTS.md release/package/AGENTS.md
-          cp .env.example release/package/.env.example
-          cp tsconfig.json release/package/tsconfig.json
-          cp eslint.config.js release/package/eslint.config.js
-          cp .prettierrc release/package/.prettierrc
-          cp -R dist release/package/dist
-          cp -R src release/package/src
-          cp data/.gitkeep release/package/data/.gitkeep
-
-      - name: Create Dishost ZIP
-        run: |
-          cd release/package
-          zip -r ../youth-exchange-bot-dishost.zip . \
-            -x 'node_modules/*' \
-            -x '.git/*' \
-            -x '.github/*' \
-            -x 'coverage/*' \
-            -x 'logs/*' \
-            -x '*.log' \
-            -x '.env' \
-            -x 'data/youth-exchange.db' \
-            -x 'tests/*'
-
-      - name: Upload Dishost artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: 청춘거래소-디스호스트
-          path: release/youth-exchange-bot-dishost.zip
-          if-no-files-found: error
