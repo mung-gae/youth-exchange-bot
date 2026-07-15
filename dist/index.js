@@ -1,0 +1,34 @@
+import 'dotenv/config';
+import { Client, GatewayIntentBits, Events } from 'discord.js';
+import { openDatabase } from './database/connection.js';
+import { migrate } from './database/schema.js';
+import { seedItems } from './database/seed.js';
+import { YouthExchangeService } from './services/coreService.js';
+import { SaleDeadlineJob } from './jobs/saleDeadlineJob.js';
+import { handleSeasonInvestment } from './commands/seasonInvestment/handler.js';
+function requireEnv() { const miss = ['DISCORD_TOKEN', 'CLIENT_ID'].filter(k => !process.env[k]); if (miss.length) {
+    console.error(`[청춘거래소] 필수 환경 변수가 누락되었습니다: ${miss.join(', ')}`);
+    process.exitCode = 1;
+    return false;
+} return true; }
+process.on('unhandledRejection', (e) => console.error('[청춘거래소] 처리되지 않은 Promise 오류', e));
+process.on('uncaughtException', (e) => console.error('[청춘거래소] 처리되지 않은 오류', e));
+const db = openDatabase();
+migrate(db);
+seedItems(db);
+const svc = new YouthExchangeService(db);
+const jobs = new SaleDeadlineJob(svc);
+jobs.restore();
+if (requireEnv()) {
+    const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers] });
+    client.once(Events.ClientReady, () => { console.log('[청춘거래소] Discord 로그인 완료'); client.user?.setActivity('청춘거래소 /계절투자'); console.log('[청춘거래소] 준비 완료'); });
+    client.on(Events.InteractionCreate, async (i) => { if (i.isChatInputCommand?.() && i.commandName === '계절투자')
+        await handleSeasonInvestment(i, svc); });
+    const shutdown = () => { console.log('[청춘거래소] 종료 처리 중'); jobs.shutdown(); db.close(); client.destroy(); process.exit(0); };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+    await client.login(process.env.DISCORD_TOKEN);
+}
+else {
+    db.close();
+}
