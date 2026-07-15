@@ -1,0 +1,71 @@
+name: Build Dishost Package
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-dishost-package:
+    name: Build Dishost Package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run lint
+        run: npm run lint
+
+      - name: Run typecheck
+        run: npm run typecheck
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build TypeScript
+        run: npm run build
+
+      - name: Prepare Dishost package directory
+        run: |
+          rm -rf release
+          mkdir -p release/package/data
+          cp -R dist release/package/dist
+          cp data/.gitkeep release/package/data/.gitkeep
+          cp package.json release/package/package.json
+          cp package-lock.json release/package/package-lock.json
+          cp .env.example release/package/.env.example
+          cp README-DISHOST.md release/package/README-DISHOST.md
+
+      - name: Create Dishost ZIP
+        run: |
+          cd release/package
+          zip -r ../youth-exchange-bot-dishost.zip . \
+            -x 'node_modules/*' \
+            -x '.git/*' \
+            -x '.github/*' \
+            -x 'coverage/*' \
+            -x 'logs/*' \
+            -x '*.log' \
+            -x '.env' \
+            -x 'data/youth-exchange.db' \
+            -x 'src/*' \
+            -x 'tests/*'
+
+      - name: Upload Dishost artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 청춘거래소-디스호스트
+          path: release/youth-exchange-bot-dishost.zip
+          if-no-files-found: error
