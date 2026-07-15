@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+logs/
+*.log
+.env
+data/youth-exchange.db
+youth-exchange-bot-dishost.zip
+*-dishost.zip
+release/
