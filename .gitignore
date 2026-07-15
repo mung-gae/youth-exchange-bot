@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.env
+.venv/
+venv/
+.pytest_cache/
+.coverage
+coverage/
+logs/
+*.log
+data/youth-exchange.db
+release/
+*-dishost.zip
