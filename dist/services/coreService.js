@@ -1,0 +1,89 @@
+import { assertNonNegativeInt, assertPositiveInt, saleUnitPrice } from '../utils/money.js';
+import { nowIso, parseSaleEnd } from '../utils/time.js';
+const adminActions = ['STARTING_FUND', 'ADMIN_FUND_GRANT', 'ITEM_PUBLIC', 'ITEM_PRIVATE', 'BUYOUT_SET', 'BUYOUT_PUBLISH', 'SEASON_SET', 'SALE_START', 'SALE_CLOSE', 'SETTLEMENT', 'NEXT_ROUND', 'EVENT_END'];
+export class YouthExchangeService {
+    db;
+    constructor(db) {
+        this.db = db;
+    }
+    getActiveEvent(guildId) { const e = this.db.prepare("SELECT * FROM events WHERE guild_id=? AND status!='ENDED'").get(guildId); if (!e)
+        throw new Error('활성 청춘거래소 이벤트가 없습니다.'); return e; }
+    createEvent(input) { const fund = input.startingFund ?? 15000; assertPositiveInt(fund, '기본금'); return this.db.prepare('INSERT INTO events(guild_id,name,status,current_round,starting_fund,participant_role_id,created_at,channel_id) VALUES(?,?,?,?,?,?,?,?)').run(input.guildId, input.name, 'SETTING', 1, fund, input.participantRoleId ?? null, nowIso(), input.channelId).lastInsertRowid; }
+    addParticipant(eventId, userId) { this.db.prepare('INSERT OR IGNORE INTO participants(event_id,user_id,balance,starting_fund_paid,status,registered_at) VALUES(?,?,0,0,?,?)').run(eventId, userId, 'ACTIVE', nowIso()); }
+    setStatus(eventId, status) { this.db.prepare('UPDATE events SET status=? WHERE event_id=?').run(status, eventId); }
+    requireStatus(e, allowed, next) { if (!allowed.includes(e.status))
+        throw new Error(`현재 상태(${e.status})에서는 사용할 수 없습니다. 다음 단계: ${next}`); }
+    audit(e, adminId, action, data = {}) { if (!adminActions.includes(action))
+        action = 'ADMIN'; this.db.prepare('INSERT INTO admin_audit_logs(event_id,round,admin_id,action,target_user_id,before_value,after_value,reason,created_at,operation_key) VALUES(?,?,?,?,?,?,?,?,?,?)').run(e.event_id, e.current_round, adminId, action, data.targetUserId ?? null, data.before ?? null, data.after ?? null, data.reason ?? null, nowIso(), data.operationKey ?? null); }
+    grantStartingFund(eventId, adminId, users, amount, allowDuplicate = false) { assertPositiveInt(amount, '지급 금액'); const e = this.db.prepare('SELECT * FROM events WHERE event_id=?').get(eventId); if (e.status === 'ENDED')
+        throw new Error('종료된 이벤트에서는 기본금을 지급할 수 없습니다.'); let paid = 0, skipped = 0; this.db.transaction(() => { for (const u of users) {
+        this.addParticipant(eventId, u);
+        const p = this.db.prepare('SELECT * FROM participants WHERE event_id=? AND user_id=?').get(eventId, u);
+        if (p.starting_fund_paid && !allowDuplicate) {
+            skipped++;
+            continue;
+        }
+        this.db.prepare('UPDATE participants SET balance=balance+?, starting_fund_paid=1 WHERE event_id=? AND user_id=?').run(amount, eventId, u);
+        this.db.prepare('INSERT INTO transactions(event_id,round,user_id,type,quantity,amount,reason,created_at) VALUES(?,?,?,?,0,?,?,?)').run(eventId, e.current_round, u, 'STARTING_FUND', amount, '기본금 지급', nowIso());
+        paid++;
+    } this.audit(e, adminId, 'STARTING_FUND', { after: JSON.stringify({ paid, amount, total: paid * amount }) }); })(); return { paid, skipped, amount, total: paid * amount }; }
+    grantAdminFund(eventId, adminId, userId, amount, reason) { assertPositiveInt(amount, '지급 금액'); if (!reason.trim())
+        throw new Error('지급 사유는 필수입니다.'); const e = this.db.prepare('SELECT * FROM events WHERE event_id=?').get(eventId); if (e.status === 'ENDED')
+        throw new Error('종료된 이벤트에서는 자금을 지급할 수 없습니다.'); return this.db.transaction(() => { const p = this.db.prepare('SELECT * FROM participants WHERE event_id=? AND user_id=?').get(eventId, userId); if (!p)
+        throw new Error('대상은 현재 이벤트 참가자여야 합니다.'); const before = p.balance, after = before + amount; this.db.prepare('UPDATE participants SET balance=? WHERE event_id=? AND user_id=?').run(after, eventId, userId); this.db.prepare('INSERT INTO transactions(event_id,round,user_id,type,quantity,amount,reason,created_at) VALUES(?,?,?,?,0,?,?,?)').run(eventId, e.current_round, userId, 'ADMIN_FUND_GRANT', amount, reason, nowIso()); this.audit(e, adminId, 'ADMIN_FUND_GRANT', { targetUserId: userId, before: String(before), after: String(after), reason }); return { before, after, amount }; })(); }
+    setItemPublic(eventId, adminId, itemIds, isPublic) { const e = this.db.prepare('SELECT * FROM events WHERE event_id=?').get(eventId); this.db.transaction(() => { for (const id of itemIds) {
+        if (!isPublic) {
+            const bought = this.db.prepare('SELECT COALESCE(SUM(quantity),0) q FROM inventories WHERE item_id=?').get(id).q;
+            if (bought > 0)
+                throw new Error('이미 구매된 아이템은 비공개로 변경할 수 없습니다.');
+        }
+        this.db.prepare('UPDATE items SET is_public=? WHERE item_id=?').run(isPublic ? 1 : 0, id);
+    } this.audit(e, adminId, isPublic ? 'ITEM_PUBLIC' : 'ITEM_PRIVATE', { after: JSON.stringify(itemIds) }); })(); }
+    startBuying(eventId) { const e = this.db.prepare('SELECT * FROM events WHERE event_id=?').get(eventId); this.requireStatus(e, ['SETTING'], '아이템 공개 후 구매시작'); this.setStatus(eventId, 'BUYING'); }
+    closeBuying(eventId) { const e = this.db.prepare('SELECT * FROM events WHERE event_id=?').get(eventId); this.requireStatus(e, ['BUYING'], '매입금 설정'); this.setStatus(eventId, 'BUYING_CLOSED'); }
+    purchase(eventId, userId, itemId, qty) { assertPositiveInt(qty, '구매 수량'); const e = this.db.prepare('SELECT * FROM events WHERE event_id=?').get(eventId); this.requireStatus(e, ['BUYING'], '관리자가 구매시작을 해야 합니다.'); return this.db.transaction(() => { const p = this.db.prepare('SELECT * FROM participants WHERE event_id=? AND user_id=?').get(eventId, userId); if (!p)
+        throw new Error('이벤트 참가자만 구매할 수 있습니다.'); const item = this.db.prepare('SELECT * FROM items WHERE item_id=? AND is_public=1').get(itemId); if (!item)
+        throw new Error('공개된 아이템만 구매할 수 있습니다.'); const total = item.price * qty; if (p.balance < total)
+        throw new Error('보유 자금이 부족합니다.'); const r = this.db.prepare('UPDATE participants SET balance=balance-? WHERE event_id=? AND user_id=? AND balance>=?').run(total, eventId, userId, total); if (r.changes !== 1)
+        throw new Error('동시 구매 처리 중 잔액이 부족해졌습니다.'); this.db.prepare('INSERT INTO inventories(event_id,user_id,item_id,quantity) VALUES(?,?,?,?) ON CONFLICT(event_id,user_id,item_id) DO UPDATE SET quantity=quantity+excluded.quantity').run(eventId, userId, itemId, qty); this.db.prepare('INSERT INTO transactions(event_id,round,user_id,item_id,type,quantity,amount,reason,created_at) VALUES(?,?,?,?,?,?,?,?,?)').run(eventId, e.current_round, userId, itemId, 'ITEM_PURCHASE', qty, total, '아이템 구매', nowIso()); const inv = this.db.prepare('SELECT quantity FROM inventories WHERE event_id=? AND user_id=? AND item_id=?').get(eventId, userId, itemId).quantity; const bal = this.db.prepare('SELECT balance FROM participants WHERE event_id=? AND user_id=?').get(eventId, userId).balance; return { item: item.name, qty, total, balance: bal, itemQuantity: inv }; })(); }
+    minBuyout(eventId, itemId) { const row = this.db.prepare('SELECT i.price, COALESCE(SUM(inv.quantity),0) qty FROM items i LEFT JOIN inventories inv ON inv.item_id=i.item_id AND inv.event_id=? WHERE i.item_id=?').get(eventId, itemId); return { min: row.price * row.qty, price: row.price, totalQuantity: row.qty }; }
+    setBuyout(eventId, adminId, itemId, amount, source = 'ITEM') { assertNonNegativeInt(amount, '매입금'); const e = this.db.prepare('SELECT * FROM events WHERE event_id=?').get(eventId); this.requireStatus(e, ['BUYING_CLOSED', 'BUYOUT_SETTING'], '구매종료 후 매입금 설정'); const pub = this.db.prepare('SELECT 1 FROM round_buyouts WHERE event_id=? AND round=? AND is_public=1 LIMIT 1').get(eventId, e.current_round); if (pub)
+        throw new Error('매입금 공개 후에는 수정할 수 없습니다.'); const m = this.minBuyout(eventId, itemId); if (amount < m.min)
+        throw new Error(`입력 매입금 ${amount}원은 최소 설정 가능 매입금 ${m.min}원보다 낮습니다. 구매 가격 ${m.price}원, 현재 전체 보유 수량 ${m.totalQuantity}개입니다.`); this.db.prepare('INSERT INTO round_buyouts(event_id,round,item_id,buyout_amount,is_public,source) VALUES(?,?,?,?,0,?) ON CONFLICT(event_id,round,item_id) DO UPDATE SET buyout_amount=excluded.buyout_amount, source=excluded.source').run(eventId, e.current_round, itemId, amount, source); this.setStatus(eventId, 'BUYOUT_SETTING'); this.audit(e, adminId, 'BUYOUT_SET', { after: JSON.stringify({ itemId, amount, source }) }); }
+    setTierBuyout(eventId, adminId, tier, amount) { const ids = this.db.prepare('SELECT item_id FROM items WHERE price_tier=?').all(tier).map((r) => r.item_id); for (const id of ids)
+        this.setBuyout(eventId, adminId, id, amount, 'TIER'); }
+    publishBuyouts(eventId, adminId) { const e = this.db.prepare('SELECT * FROM events WHERE event_id=?').get(eventId); this.requireStatus(e, ['BUYING_CLOSED', 'BUYOUT_SETTING'], '모든 아이템 매입금 설정'); const count = this.db.prepare('SELECT COUNT(*) c FROM round_buyouts WHERE event_id=? AND round=?').get(eventId, e.current_round).c; if (count < 12)
+        throw new Error('현재 라운드의 모든 아이템 매입금을 설정해야 합니다.'); this.db.prepare('UPDATE round_buyouts SET is_public=1 WHERE event_id=? AND round=?').run(eventId, e.current_round); this.setStatus(eventId, 'BUYOUT_PUBLISHED'); this.audit(e, adminId, 'BUYOUT_PUBLISH'); }
+    setSeason(eventId, adminId, season) { if (!['봄', '여름', '가을', '겨울'].includes(season))
+        throw new Error('계절은 봄, 여름, 가을, 겨울만 입력할 수 있습니다.'); const e = this.db.prepare('SELECT * FROM events WHERE event_id=?').get(eventId); this.requireStatus(e, ['BUYOUT_PUBLISHED'], '매입금 공개 후 외부 추첨 결과 입력'); this.db.prepare('UPDATE events SET selected_season=?, status=? WHERE event_id=?').run(season, 'SEASON_SELECTED', eventId); this.audit(e, adminId, 'SEASON_SET', { after: season }); }
+    startSelling(eventId, adminId, end) { const e = this.db.prepare('SELECT * FROM events WHERE event_id=?').get(eventId); this.requireStatus(e, ['SEASON_SELECTED'], '계절결과 입력 후 판매시작'); const saleEnd = parseSaleEnd(end); const start = nowIso(); this.db.prepare('UPDATE events SET sale_start_at=?,sale_end_at=?,status=? WHERE event_id=?').run(start, saleEnd, 'SELLING', eventId); this.audit(e, adminId, 'SALE_START', { after: saleEnd }); return { start, saleEnd }; }
+    closeSelling(eventId) { const e = this.db.prepare('SELECT * FROM events WHERE event_id=?').get(eventId); if (e.status === 'SELLING_CLOSED')
+        return false; this.requireStatus(e, ['SELLING'], '정산미리보기 또는 정산'); this.db.prepare('UPDATE events SET status=? WHERE event_id=? AND status=?').run('SELLING_CLOSED', eventId, 'SELLING'); return true; }
+    saleRequest(eventId, userId, itemId, qty) { assertPositiveInt(qty, '판매 수량'); const e = this.db.prepare('SELECT * FROM events WHERE event_id=?').get(eventId); this.requireStatus(e, ['SELLING'], '판매시작 후 판매 신청'); if (!e.sale_end_at || new Date(e.sale_end_at) <= new Date())
+        throw new Error('판매 종료 시간이 지났습니다.'); const item = this.db.prepare('SELECT * FROM items WHERE item_id=?').get(itemId); if (item.season !== e.selected_season)
+        throw new Error('외부 추첨으로 선택된 계절 아이템만 판매할 수 있습니다.'); const have = this.db.prepare('SELECT COALESCE(quantity,0) q FROM inventories WHERE event_id=? AND user_id=? AND item_id=?').get(eventId, userId, itemId).q; if (qty > have)
+        throw new Error('판매 수량은 보유 수량을 초과할 수 없습니다.'); this.db.prepare("INSERT INTO sale_requests(event_id,round,user_id,item_id,quantity,status,settled,created_at,updated_at) VALUES(?,?,?,?,?,'ACTIVE',0,?,?) ON CONFLICT(event_id,round,user_id,item_id) DO UPDATE SET quantity=excluded.quantity,status='ACTIVE',updated_at=excluded.updated_at").run(eventId, e.current_round, userId, itemId, qty, nowIso(), nowIso()); }
+    cancelSale(eventId, userId, itemId) { const e = this.db.prepare('SELECT * FROM events WHERE event_id=?').get(eventId); this.requireStatus(e, ['SELLING'], '판매 중에만 취소 가능'); this.db.prepare("UPDATE sale_requests SET quantity=0,status='CANCELLED',updated_at=? WHERE event_id=? AND round=? AND user_id=? AND item_id=?").run(nowIso(), eventId, e.current_round, userId, itemId); }
+    previewSettlement(eventId) { const e = this.db.prepare('SELECT * FROM events WHERE event_id=?').get(eventId); const rows = this.db.prepare("SELECT b.item_id,i.name,b.buyout_amount,COALESCE(SUM(CASE WHEN s.status='ACTIVE' THEN s.quantity ELSE 0 END),0) total_qty FROM round_buyouts b JOIN items i ON i.item_id=b.item_id LEFT JOIN sale_requests s ON s.event_id=b.event_id AND s.round=b.round AND s.item_id=b.item_id WHERE b.event_id=? AND b.round=? GROUP BY b.item_id").all(eventId, e.current_round); return rows.map((r) => { const unit = saleUnitPrice(r.buyout_amount, r.total_qty); return { ...r, unit_price: unit, total_paid: unit * r.total_qty, unused_buyout: r.buyout_amount - unit * r.total_qty }; }); }
+    settle(eventId, adminId) { const e = this.db.prepare('SELECT * FROM events WHERE event_id=?').get(eventId); this.requireStatus(e, ['SELLING_CLOSED'], '판매종료 후 정산'); return this.db.transaction(() => { if (this.db.prepare('SELECT 1 FROM settlements WHERE event_id=? AND round=? LIMIT 1').get(eventId, e.current_round))
+        throw new Error('이미 정산된 라운드입니다.'); const preview = this.previewSettlement(eventId); for (const p of preview) {
+        if (p.total_qty <= 0)
+            continue;
+        const reqs = this.db.prepare("SELECT * FROM sale_requests WHERE event_id=? AND round=? AND item_id=? AND status='ACTIVE' AND quantity>0").all(eventId, e.current_round, p.item_id);
+        for (const r of reqs) {
+            const have = this.db.prepare('SELECT quantity FROM inventories WHERE event_id=? AND user_id=? AND item_id=?').get(eventId, r.user_id, r.item_id)?.quantity ?? 0;
+            if (have < r.quantity)
+                throw new Error('보유 수량 불일치로 정산할 수 없습니다.');
+            const amount = p.unit_price * r.quantity;
+            this.db.prepare('UPDATE inventories SET quantity=quantity-? WHERE event_id=? AND user_id=? AND item_id=?').run(r.quantity, eventId, r.user_id, r.item_id);
+            this.db.prepare('UPDATE participants SET balance=balance+? WHERE event_id=? AND user_id=?').run(amount, eventId, r.user_id);
+            this.db.prepare('INSERT INTO transactions(event_id,round,user_id,item_id,type,quantity,amount,reason,created_at) VALUES(?,?,?,?,?,?,?,?,?)').run(eventId, e.current_round, r.user_id, r.item_id, 'ITEM_SALE', r.quantity, amount, '아이템 판매 정산', nowIso());
+        }
+        this.db.prepare('INSERT INTO settlements(event_id,round,item_id,total_quantity,unit_price,total_paid,unused_buyout,settled_at) VALUES(?,?,?,?,?,?,?,?)').run(eventId, e.current_round, p.item_id, p.total_qty, p.unit_price, p.total_paid, p.unused_buyout, nowIso());
+    } this.db.prepare("UPDATE sale_requests SET settled=1,status='SETTLED',updated_at=? WHERE event_id=? AND round=? AND status='ACTIVE'").run(nowIso(), eventId, e.current_round); this.setStatus(eventId, 'SETTLED'); this.audit(e, adminId, 'SETTLEMENT'); return preview; })(); }
+    nextRound(eventId, adminId) { const e = this.db.prepare('SELECT * FROM events WHERE event_id=?').get(eventId); this.requireStatus(e, ['SETTLED'], '정산 완료 후 다음라운드'); this.db.prepare("UPDATE events SET current_round=current_round+1,status='BUYOUT_SETTING',selected_season=NULL,sale_start_at=NULL,sale_end_at=NULL WHERE event_id=?").run(eventId); this.audit(e, adminId, 'NEXT_ROUND'); }
+    endEvent(eventId, adminId) { const e = this.db.prepare('SELECT * FROM events WHERE event_id=?').get(eventId); if (e.status === 'ENDED')
+        return; this.db.transaction(() => { const invs = this.db.prepare('SELECT * FROM inventories WHERE event_id=? AND quantity>0').all(eventId); for (const inv of invs) {
+        this.db.prepare('INSERT INTO transactions(event_id,round,user_id,item_id,type,quantity,amount,reason,created_at) VALUES(?,?,?,?,?,?,0,?,?)').run(eventId, e.current_round, inv.user_id, inv.item_id, 'ITEM_EXPIRATION', inv.quantity, '이벤트 종료 소멸', nowIso());
+    } this.db.prepare('UPDATE inventories SET quantity=0 WHERE event_id=?').run(eventId); this.db.prepare("UPDATE events SET status='ENDED',ended_at=? WHERE event_id=?").run(nowIso(), eventId); this.audit(e, adminId, 'EVENT_END'); })(); }
+}
