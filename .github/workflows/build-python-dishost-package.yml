@@ -1,0 +1,42 @@
+name: Build Python Dishost Package
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-python-dishost-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run tests
+        run: python -m unittest discover -s tests
+      - name: Compile check
+        run: python -m py_compile app.py youth_exchange.py
+      - name: Prepare package
+        run: |
+          rm -rf release
+          mkdir -p release/package/data
+          cp app.py youth_exchange.py requirements.txt .env.example README.md README-DISHOST.md release/package/
+          cp data/.gitkeep release/package/data/.gitkeep
+      - name: Create ZIP
+        run: |
+          cd release/package
+          zip -r ../youth-exchange-bot-python-dishost.zip . \
+            -x '__pycache__/*' \
+            -x '.env' \
+            -x 'data/youth-exchange.db' \
+            -x '*.log'
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: 청춘거래소-파이썬-디스호스트
+          path: release/youth-exchange-bot-python-dishost.zip
+          if-no-files-found: error
